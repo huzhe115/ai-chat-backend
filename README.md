@@ -2,7 +2,18 @@
 
 AI 聊天应用后端服务——比特鹰成长计划「项目实战:AI 服务后端系统」。
 
-FastAPI + PostgreSQL + Redis + RabbitMQ 的完整异步后端,支持注册登录、多轮对话(LLM 回复)、异步任务(会话摘要)和任务状态查询。
+FastAPI + PostgreSQL + Redis + RabbitMQ 的完整异步后端,支持注册登录、多轮对话(LLM 回复)、异步任务(会话摘要)和任务状态查询。前端是 React(Vite)单页应用,构建产物直接由 FastAPI 托管。
+
+## 前端开发
+
+```bash
+cd frontend
+npm install
+npm run dev        # 开发模式:5173 端口,API 自动代理到 8000
+npm run build      # 构建产物输出到 ../static/,FastAPI 直接托管
+```
+
+前端无路由库、无 UI 框架,纯 React + 单 CSS 文件,状态用 useState/useEffect。
 
 ## 架构
 
