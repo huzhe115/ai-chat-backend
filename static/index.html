@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>AI Chat</title>
+<style>
+  body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+  #login, #chat { display: none; }
+  .msg { padding: 8px 12px; margin: 6px 0; border-radius: 8px; max-width: 75%; }
+  .user { background: #e3f2fd; margin-left: auto; }
+  .assistant { background: #f5f5f5; }
+  .chat-item { cursor: pointer; padding: 6px; border-bottom: 1px solid #eee; }
+  .chat-item:hover { background: #fafafa; }
+  #chats { border: 1px solid #ddd; margin-bottom: 10px; max-height: 150px; overflow-y: auto; }
+  textarea { width: 100%; height: 60px; }
+  button { padding: 6px 16px; margin: 4px 2px; }
+  #summary-result { white-space: pre-wrap; background: #fff8e1; padding: 10px; border-radius: 8px; display: none; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>登录 / 注册</h2>
+  <input id="name" placeholder="用户名">
+  <input id="password" type="password" placeholder="密码(至少6位)">
+  <button onclick="doLogin()">登录</button>
+  <button onclick="doRegister()">注册</button>
+</div>
+
+<div id="chat">
+  <h2>AI Chat <small id="whoami"></small></h2>
+  <div style="display:flex; gap:8px;">
+    <input id="chat-title" placeholder="新会话标题">
+    <button onclick="createChat()">新建会话</button>
+    <button onclick="doSummary()">生成摘要</button>
+  </div>
+  <div id="chats"></div>
+  <div id="messages" style="min-height:300px; border:1px solid #ddd; padding:10px; margin-bottom:10px;"></div>
+  <div id="summary-result"></div>
+  <textarea id="content" placeholder="输入消息..."></textarea>
+  <br>
+  <button onclick="sendMessage()">发送</button>
+</div>
+
+<script>
+const API = "";
+let token = localStorage.getItem("token");
+let currentChatId = null;
+
+async function api(path, method = "GET", body) {
+  const resp = await fetch(API + path, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: "Bearer " + token } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.detail || resp.status);
+  return data;
+}
+
+function show(id) { document.getElementById(id).style.display = "block"; }
+
+async function doRegister() {
+  await api("/auth/register", "POST", {
+    name: document.getElementById("name").value,
+    password: document.getElementById("password").value,
+  });
+  await doLogin();
+}
+
+async function doLogin() {
+  const data = await api("/auth/login", "POST", {
+    name: document.getElementById("name").value,
+    password: document.getElementById("password").value,
+  });
+  token = data.access_token;
+  localStorage.setItem("token", token);
+  document.getElementById("login").style.display = "none";
+  show("chat");
+  document.getElementById("whoami").textContent = "(" + document.getElementById("name").value + ")";
+  loadChats();
+}
+
+async function createChat() {
+  await api("/chats", "POST", { title: document.getElementById("chat-title").value || "新会话" });
+  document.getElementById("chat-title").value = "";
+  loadChats();
+}
+
+async function loadChats() {
+  const chats = await api("/chats");
+  const box = document.getElementById("chats");
+  box.innerHTML = chats.map(c =>
+    `<div class="chat-item" onclick="openChat(${c.id})">#${c.id} ${c.title}</div>`).join("");
+}
+
+async function openChat(id) {
+  currentChatId = id;
+  const msgs = await api(`/chats/${id}/messages`);
+  const box = document.getElementById("messages");
+  box.innerHTML = msgs.map(m =>
+    `<div class="msg ${m.role}"><b>${m.role === "user" ? "我" : "AI"}:</b> ${escapeHtml(m.content)}</div>`).join("");
+  document.getElementById("summary-result").style.display = "none";
+}
+
+async function sendMessage() {
+  if (!currentChatId) { alert("先新建或选择一个会话"); return; }
+  const content = document.getElementById("content").value;
+  if (!content) return;
+  document.getElementById("content").value = "";
+  const box = document.getElementById("messages");
+  box.innerHTML += `<div class="msg user"><b>我:</b> ${escapeHtml(content)}</div>`;
+  try {
+    const msgs = await api(`/chats/${currentChatId}/messages`, "POST", { content });
+    box.innerHTML += `<div class="msg assistant"><b>AI:</b> ${escapeHtml(msgs[1].content)}</div>`;
+  } catch (e) {
+    box.innerHTML += `<div class="msg assistant"><b>错误:</b> ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function doSummary() {
+  if (!currentChatId) { alert("先选择一个会话"); return; }
+  const task = await api(`/chats/${currentChatId}/summary`, "POST");
+  const result = document.getElementById("summary-result");
+  result.style.display = "block";
+  result.textContent = "摘要生成中(任务 #" + task.id + ")...";
+  const timer = setInterval(async () => {
+    const t = await api("/tasks/" + task.id);
+    if (t.status === "done") {
+      clearInterval(timer);
+      result.textContent = "📝 摘要:\n" + t.result;
+    } else if (t.status === "failed") {
+      clearInterval(timer);
+      result.textContent = "摘要失败: " + t.error;
+    }
+  }, 2000); // 每 2 秒轮询任务状态
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+if (token) { document.getElementById("login").style.display = "none"; show("chat"); loadChats(); }
+else show("login");
+</script>
+</body>
+</html>
