@@ -1,27 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "./api.js";
+import { api, streamApi } from "./api.js";
 
 export default function Chat({ onLogout }) {
   const [chats, setChats] = useState([]);
   const [current, setCurrent] = useState(null); // 当前会话 id
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [thinking, setThinking] = useState(false);
-  const [summary, setSummary] = useState(null); // { text, status }
+  const [streaming, setStreaming] = useState(null); // null=空闲,""=等待首个字,非空=流式文本
+  const [creating, setCreating] = useState(false); // 新建会话请求进行中
   const listRef = useRef(null);
+  const currentRef = useRef(null); // 供流式回调判断"用户是否中途切了会话"
 
-  // 载入会话列表,并默认选中第一个
-  const loadChats = async (selectId) => {
+  // 首屏:载入会话列表并选中第一个
+  const loadChats = async () => {
     const list = await api("/chats");
     setChats(list);
-    const target = list.find((c) => c.id === selectId) || list[0] || null;
-    if (target) setCurrent(target.id);
+    if (list[0]) setCurrent(list[0].id);
+  };
+
+  // 只刷新侧栏列表,不动选中(发完消息刷标题用)
+  const refreshChats = async () => {
+    setChats(await api("/chats"));
   };
 
   const loadMessages = async (chatId) => {
     if (!chatId) return setMessages([]);
     const msgs = await api(`/chats/${chatId}/messages`);
-    setMessages(msgs);
+    if (chatId === currentRef.current) setMessages(msgs); // 回复回来时已切走,丢弃
   };
 
   useEffect(() => {
@@ -29,57 +34,75 @@ export default function Chat({ onLogout }) {
   }, []);
 
   useEffect(() => {
+    currentRef.current = current;
+    setStreaming(null); // 切会话时丢弃进行中的流,回来看会从库里重新读到
+    setMessages([]); // 立刻清空,别让上个会话的内容短暂残留在新会话里
     loadMessages(current).catch(() => {});
   }, [current]);
 
   // 新消息后自动滚到底部
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [messages, thinking]);
+  }, [messages, streaming]);
+
+  const deleteChat = async (e, id) => {
+    e.stopPropagation(); // 别触发选中该会话
+    if (!window.confirm("删除该会话?消息将一并删除")) return;
+    try {
+      await api(`/chats/${id}`, { method: "DELETE" });
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+    const rest = chats.filter((c) => c.id !== id);
+    setChats(rest);
+    if (id === current) setCurrent(rest[0]?.id ?? null);
+  };
 
   const newChat = async () => {
-    const chat = await api("/chats", {
-      method: "POST",
-      body: { title: "新会话" },
-    });
-    await loadChats(chat.id);
+    if (creating) return; // 防双击重复创建
+    setCreating(true);
+    try {
+      const chat = await api("/chats", {
+        method: "POST",
+        body: { title: "新会话" },
+      });
+      setChats((prev) => [chat, ...prev]); // POST 返回完整会话,直接插侧栏顶部
+      setCurrent(chat.id); // 不等列表刷新,立刻切过去
+    } finally {
+      setCreating(false);
+    }
   };
 
   const send = async (e) => {
     e.preventDefault();
     const content = input.trim();
-    if (!content || !current || thinking) return;
+    if (!content || !current || streaming !== null || creating) return; // 创建中不发,防发到旧会话
+    const chatId = current;
     setInput("");
-    setThinking(true);
+    setStreaming("");
     try {
-      const [userMsg, aiMsg] = await api(`/chats/${current}/messages`, {
-        method: "POST",
+      await streamApi(`/chats/${chatId}/messages/stream`, {
         body: { content },
+        onEvent: (ev) => {
+          if (chatId !== currentRef.current) return; // 中途切了会话,丢弃事件
+          if (ev.user_msg) setMessages((prev) => [...prev, ev.user_msg]);
+          else if (ev.delta) setStreaming((t) => t + ev.delta);
+          else if (ev.assistant_msg) {
+            setMessages((prev) => [...prev, ev.assistant_msg]);
+            setStreaming(null);
+          } else if (ev.error) {
+            alert(ev.error);
+            setStreaming(null);
+          }
+        },
       });
-      setMessages((prev) => [...prev, userMsg, aiMsg]);
     } catch (err) {
       alert(err.message);
     } finally {
-      setThinking(false);
+      setStreaming(null);
+      refreshChats().catch(() => {}); // 首条消息后标题变了,刷新侧栏(不切选中)
     }
-  };
-
-  const generateSummary = async () => {
-    if (!current) return;
-    setSummary({ status: "生成中..." });
-    const task = await api(`/chats/${current}/summary`, { method: "POST" });
-    // 轮询任务状态,2 秒一次
-    const timer = setInterval(async () => {
-      const t = await api(`/tasks/${task.id}`);
-      if (t.status === "done" || t.status === "failed") {
-        clearInterval(timer);
-        setSummary(
-          t.status === "done"
-            ? { status: "done", text: t.result }
-            : { status: "failed", text: t.error || "摘要生成失败" }
-        );
-      }
-    }, 2000);
   };
 
   return (
@@ -90,7 +113,7 @@ export default function Chat({ onLogout }) {
           <h1 className="app-title">AI 聊天助手</h1>
           <div className="app-divider" />
         </div>
-        <button className="primary full" onClick={newChat}>
+        <button className="primary full" onClick={newChat} disabled={creating}>
           + 新建会话
         </button>
         <div className="chat-list">
@@ -100,7 +123,10 @@ export default function Chat({ onLogout }) {
               className={`chat-item ${c.id === current ? "active" : ""}`}
               onClick={() => setCurrent(c.id)}
             >
-              {c.title}
+              <span className="chat-title">{c.title}</span>
+              <button className="chat-del" title="删除会话" onClick={(e) => deleteChat(e, c.id)}>
+                ✕
+              </button>
             </div>
           ))}
         </div>
@@ -113,21 +139,8 @@ export default function Chat({ onLogout }) {
       <main className="chat-main">
         {current ? (
           <>
-            <div className="chat-topbar">
-              <button className="ghost" onClick={generateSummary} disabled={summary?.status === "生成中..."}>
-                ✨ 生成摘要
-              </button>
-            </div>
-
-            {summary && (
-              <div className={`summary-box ${summary.status}`}>
-                <b>{summary.status === "生成中..." ? "摘要生成中,请稍候..." : "会话摘要"}</b>
-                {summary.text && <p>{summary.text}</p>}
-              </div>
-            )}
-
             <div className="messages" ref={listRef}>
-              {messages.length === 0 && !thinking && (
+              {messages.length === 0 && streaming === null && (
                 <div className="empty-tip">你好呀,有什么可以帮助你的?</div>
               )}
               {messages.map((m) => (
@@ -136,11 +149,11 @@ export default function Chat({ onLogout }) {
                   <div className="bubble">{m.content}</div>
                 </div>
               ))}
-              {thinking && (
+              {streaming !== null && (
                 <div className="msg assistant">
                   <span className="avatar">🤖</span>
-                  <div className="bubble thinking">
-                    <span className="spinner" /> AI 思考中...
+                  <div className={`bubble${streaming === "" ? " thinking" : ""}`}>
+                    {streaming === "" ? <span className="spinner" /> : streaming}
                   </div>
                 </div>
               )}
@@ -159,7 +172,7 @@ export default function Chat({ onLogout }) {
                 }}
                 rows={2}
               />
-              <button className="primary" disabled={!input.trim() || thinking}>
+              <button className="primary" disabled={!input.trim() || streaming !== null || creating}>
                 发送
               </button>
             </form>

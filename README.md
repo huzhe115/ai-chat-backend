@@ -38,9 +38,11 @@ npm run build      # 构建产物输出到 ../static/,FastAPI 直接托管
 
 **设计要点**
 
-- **消息列表缓存**:`GET /chats/{id}/messages` 先查 Redis(TTL 60s),未命中查库回填;新消息落库后主动失效缓存。Redis 不可用时自动降级查库,不影响主流程。
+- **消息列表缓存**:`GET /chats/{id}/messages` 先查 Redis(TTL 60s),未命中查库回填;新消息落库后主动失效缓存。Redis 不可用时自动降级查库;`app/redis_client.py` 带熔断器——探到一次失败后 30 秒内直接跳过 Redis,降级路径本身也是毫秒级(否则每次读消息都白等连接超时)。
+- **流式回复**:`POST /chats/{id}/messages/stream` 按 SSE 逐段推送(事件序:`user_msg` → `delta`×N → `assistant_msg`/`error`),前端边生成边显示;中途失败发 `error` 事件,用户消息已先落库不丢。
 - **异步任务**:`POST /chats/{id}/summary` 秒回 202 并返回任务 id,worker 从 RabbitMQ 消费、调 LLM 生成摘要、回写 `tasks` 表并缓存结果。durable 队列 + persistent 消息 + ack 确认,重启不丢任务。
-- **错误处理**:MQ 不可用 → 接口 503 且任务标记 `failed`;LLM 失败 → 502 但用户消息已落库;缓存失败 → 降级,只记日志。
+- **会话标题**:首条消息自动截断前 16 字作为标题(仅当仍是默认标题"新会话"),不额外调 LLM,零成本零延迟。
+- **错误处理**:MQ 不可用 → 接口 503 且任务标记 `failed`;LLM 失败 → 502(流式则发 `error` 事件)但用户消息已落库;缓存失败 → 降级 + 熔断,只记日志。
 - **安全**:bcrypt 密码哈希(不存明文)、JWT 无状态鉴权、会话归属校验(越权返回 404)、Pydantic 参数校验。
 
 ## 快速开始
@@ -90,16 +92,23 @@ CHAT=$(curl -X POST localhost:8000/chats -H "Authorization: Bearer $TOKEN" \
 curl -X POST localhost:8000/chats/$CHAT/messages -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"content":"你好"}'
 
+# 流式发消息(SSE,边生成边返回)
+curl -N -X POST localhost:8000/chats/$CHAT/messages/stream -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"content":"你好"}'
+
 # 触发异步摘要任务,轮询结果
 TASK=$(curl -X POST localhost:8000/chats/$CHAT/summary \
   -H "Authorization: Bearer $TOKEN" | jq -r .id)
 curl localhost:8000/tasks/$TASK -H "Authorization: Bearer $TOKEN"
+
+# 删除会话(消息/任务由外键级联删除)
+curl -X DELETE localhost:8000/chats/$CHAT -H "Authorization: Bearer $TOKEN"
 ```
 
 ## 测试
 
 ```bash
-uv run pytest          # 16 个测试:单元 + 接口 + worker 降级路径
+uv run pytest          # 23 个测试:单元 + 接口 + worker 降级路径 + 熔断器
 uv run ruff check .    # lint
 ```
 
@@ -109,7 +118,7 @@ uv run ruff check .    # lint
 
 本项目两处调用 LLM,提示词设计各有侧重:
 
-**1. 多轮对话(`POST /chats/{id}/messages`,见 `app/api/chats.py`)**
+**1. 多轮对话(`POST /chats/{id}/messages` 与 `/messages/stream`,见 `app/api/chats.py`)**
 
 - 每次从数据库取最近 20 条消息(`HISTORY_LIMIT`),按时间正序拼成 `messages`,保留 user/assistant 角色交替——多轮上下文是"聊得起来"的关键。
 - 超长对话截断到最近 20 条:先保证上下文窗口不溢出,再谈记忆长度。

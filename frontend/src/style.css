@@ -87,6 +87,7 @@ body {
 .app-divider { height: 1px; background: #eee; margin-top: 8px; }
 .chat-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .chat-item {
+  position: relative;
   padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
@@ -96,6 +97,23 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-del {
+  display: none;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: #dbe6ff;
+  color: #4f6fb5;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+}
+.chat-item:hover .chat-del { display: block; }
+.chat-del:hover { background: #e53935; color: #fff; }
 .chat-item:hover { background: #f0f5ff; }
 .chat-item.active { background: #e3edff; color: #2563eb; }
 
@@ -105,25 +123,6 @@ body {
   flex-direction: column;
   min-width: 0;
 }
-.chat-topbar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 12px 20px;
-  border-bottom: 1px solid #eee;
-  background: #fff;
-}
-
-/* ---------- 摘要 ---------- */
-.summary-box {
-  margin: 12px 20px 0;
-  padding: 12px 16px;
-  border-radius: 8px;
-  background: #fff8e1;
-  border: 1px solid #f0e2b6;
-  font-size: 14px;
-}
-.summary-box.failed { background: #ffecec; border-color: #f3c1c1; }
-.summary-box p { margin: 6px 0 0; white-space: pre-wrap; color: #444; }
 
 /* ---------- 消息区 ---------- */
 .messages {
